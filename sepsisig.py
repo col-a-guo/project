@@ -217,10 +217,6 @@ while len(X_train.columns) > 10:
                 break
         model.train() #Back to training mode after validation
 
-        #if (epoch+1) % 10 == 0:
-        #    print (f'Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}, Validation Loss: {test_loss.item():.4f}')
-        #if (epoch+1) % 10 == 0:
-        #    print(f'Epoch [{epoch+1}/{epochs}], Training Loss: {loss.item():.4f}, Macro-average F1: {macro_f1:.4f}')
 
     # Evaluation and Classification Report
     model.eval()
