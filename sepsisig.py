@@ -9,8 +9,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import classification_report
 from imblearn.over_sampling import SMOTE  # Import SMOTE
-from sklearn.linear_model import LogisticRegression
-from sklearn.feature_selection import SelectFromModel
 
 # --- Data Loading and Preprocessing (same as your previous code) ---
 print("Current working directory:", os.getcwd())
@@ -71,121 +69,101 @@ print(combined_df)
 from sklearn.model_selection import train_test_split
 X = combined_df.drop('SepsisLabel', axis=1)
 y = combined_df['SepsisLabel']
-X_train_original, X_test, y_train_original, y_test = train_test_split(X, y, test_size=0.3, random_state=66)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=66)
 
 
 # --- Oversampling with SMOTE (ONLY on the training set) ---
 smote = SMOTE(random_state=42)  # Instantiate SMOTE
-X_train_original, y_train_original = smote.fit_resample(X_train_original, y_train_original)
-
-# Make a copy of the dataframes since feature selection happens INPLACE
-X_train = X_train_original.copy()
-y_train = y_train_original.copy()
-
-X_test = X_test.copy() #No oversampling, but copy
-
-print("Oversampled Training Features shape:\n", X_train.shape)
-print("Oversampled Training Labels shape:\n", y_train.shape)
+X_train, y_train = smote.fit_resample(X_train, y_train)
 
 
-# --- Feature Selection Loop ---
+# --- Feature Selection ---
+selected_features = ['HR', 'Temp', 'SBP', 'MAP', 'Resp', 'BaseExcess', 'pH', 'PaCO2', 'Potassium', 'Hct', 'Hgb', 'Platelets', 'Age', 'Gender', 'Unit1', 'HospAdmTime', 'ICULOS']
 
-original_columns = X_train.columns.tolist()
-all_results = []
+X_train = X_train[selected_features]
+X_test = X_test[selected_features]
 
-while len(X_train.columns) > 10:
-    print(f"\n--- Feature Selection Iteration: {len(X_train.columns)} features ---")
+print("Selected Training Features shape:\n", X_train.shape)
+print("Selected Testing Features shape:\n", X_test.shape)
 
-    # 1. Logistic Regression for Feature Importance
-    logistic = LogisticRegression(solver='liblinear', random_state=42)
-    logistic.fit(X_train, y_train)
 
-    # 2. Determine Threshold for Feature Removal
-    num_features = X_train.shape[1]
-    num_to_remove = max(1, int(np.floor(0.15 * num_features))) # Ensure at least one feature is removed
-    print(f"Removing {num_to_remove} features")
+# --- NumPy Array Conversion (Fixed types, NO one-hot encoding) ---
 
-    # Get feature importances and their corresponding column names
-    feature_importances = pd.DataFrame({'feature': X_train.columns, 'importance': np.abs(logistic.coef_[0])}) #Absolute values of coefficients
-    feature_importances = feature_importances.sort_values('importance', ascending=True)
+X_train = X_train.to_numpy().astype(np.float32)
+X_test = X_test.to_numpy().astype(np.float32)
+y_train = y_train.to_numpy().astype(np.float32)
+y_test = y_test.to_numpy().astype(np.float32)
 
-    # Identify the least important features to remove
-    features_to_remove = feature_importances['feature'].head(num_to_remove).tolist()
 
-    print("Features to remove:", features_to_remove)
+# --- PyTorch Model Definition ---
 
-    # 3. Remove Least Important Features
-    X_train.drop(columns=features_to_remove, inplace=True)
-    X_test.drop(columns=features_to_remove, inplace=True)
+class PytorchModelBinary(nn.Module):  # Renamed to indicate binary classification
+    def __init__(self, input_dim, hidden_layers):
+        super(PytorchModelBinary, self).__init__()
+        self.layers = nn.ModuleList()  # Use ModuleList to store layers
 
-    print("Remaining features:", X_train.columns.tolist())
+        # Input layer
+        self.layers.append(nn.Linear(input_dim, hidden_layers[0]))
+        self.layers.append(nn.ReLU())
 
-    # --- NumPy Array Conversion (Fixed types, NO one-hot encoding) ---
-
-    X_train_np = X_train.to_numpy().astype(np.float32)
-    X_test_np = X_test.to_numpy().astype(np.float32)
-    y_train_np = y_train.to_numpy().astype(np.float32)
-    y_test_np = y_test.to_numpy().astype(np.float32)
-
-    # --- PyTorch Model Definition ---
-
-    class PytorchModelBinary(nn.Module):  # Renamed to indicate binary classification
-        def __init__(self, input_dim, hidden_layers):
-            super(PytorchModelBinary, self).__init__()
-            self.layers = nn.ModuleList()  # Use ModuleList to store layers
-
-            # Input layer
-            self.layers.append(nn.Linear(input_dim, hidden_layers[0]))
+        # Hidden layers
+        for i in range(len(hidden_layers) - 1):
+            self.layers.append(nn.Linear(hidden_layers[i], hidden_layers[i+1]))
             self.layers.append(nn.ReLU())
 
-            # Hidden layers
-            for i in range(len(hidden_layers) - 1):
-                self.layers.append(nn.Linear(hidden_layers[i], hidden_layers[i+1]))
-                self.layers.append(nn.ReLU())
+        # Output layer
+        self.layers.append(nn.Linear(hidden_layers[-1], 1))
+        self.layers.append(nn.Sigmoid())
 
-            # Output layer
-            self.layers.append(nn.Linear(hidden_layers[-1], 1))
-            self.layers.append(nn.Sigmoid())
-
-        def forward(self, x):
-            for layer in self.layers:
-                x = layer(x)
-            return x
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
 
 
-    # --- Simplified Configuration ---
-    hidden_layers = [64, 32]
-    optimizer_name = 'Adam'
-    print(f"Training with neurons: {hidden_layers}, optimizer: {optimizer_name}")
+# --- Hyperparameter Search ---
+neuron_configs = [
+    [256, 128, 64],
+    [64, 256, 64, 16],
+    [100, 50, 25],
+    [128, 64, 32],
+    [256, 64, 16]
+    
+]
+
+best_result = None
+best_macro_f1 = 0.0
+
+for hidden_layers in neuron_configs:
+    print(f"\n--- Training with neurons: {hidden_layers} ---")
 
     # Model Instantiation
-    input_dim = X_train_np.shape[1] #X_train is now a dataframe, but X_train_np is a numpy array
+    input_dim = X_train.shape[1]
     model = PytorchModelBinary(input_dim, hidden_layers)
 
     # Optimizer
     optimizer = optim.Adam(model.parameters())
 
-
     # Loss function
     criterion = nn.BCELoss()
 
     # Data to tensors
-    X_train_tensor = torch.tensor(X_train_np)
-    y_train_tensor = torch.tensor(y_train_np).unsqueeze(1)
-    X_test_tensor = torch.tensor(X_test_np)
-    y_test_tensor = torch.tensor(y_test_np).unsqueeze(1)
+    X_train_tensor = torch.tensor(X_train)
+    y_train_tensor = torch.tensor(y_train).unsqueeze(1)
+    X_test_tensor = torch.tensor(X_test)
+    y_test_tensor = torch.tensor(y_test).unsqueeze(1)
 
 
     # Training loop
-    epochs = 100  # Reduced epochs for faster testing
+    epochs = 500  # Reduced epochs for faster testing
     batch_size = 32
-    patience = 10
-    best_f1 = 0.0  # Initialize with a low value for F1 score (since higher is better)
+    patience = 20
+    best_f1s = [0.0, 0.0]  # Initialize best F1 scores for each class (0 and 1)
     counter = 0
 
     for epoch in range(epochs):
         model.train()
-        for i in range(0, len(X_train_np), batch_size):
+        for i in range(0, len(X_train), batch_size):
             X_batch = X_train_tensor[i:i+batch_size]
             y_batch = y_train_tensor[i:i+batch_size]
 
@@ -204,19 +182,24 @@ while len(X_train.columns) > 10:
             actual = y_test_tensor.cpu().numpy()
 
         report = classification_report(actual, predicted, output_dict=True, zero_division=0, labels=[0.0, 1.0])  # Get macro-average F1 score, set labels
-        macro_f1 = report['macro avg']['f1-score']  # Get macro-average F1 score
+        f1_0 = report['0.0']['f1-score']  # F1-score for class 0
+        f1_1 = report['1.0']['f1-score']  # F1-score for class 1
+        macro_f1 = report['macro avg']['f1-score']
 
-
-        if macro_f1 > best_f1: #Check if current macro_f1 is better than the previous best
-            best_f1 = macro_f1
-            counter = 0 # Reset counter since macro_f1 improved
+        # Check if *both* F1-scores improved
+        if f1_0 > best_f1s[0] and f1_1 > best_f1s[1]:
+            best_f1s = [f1_0, f1_1]
+            counter = 0
         else:
-            counter += 1 #Increment counter if macro_f1 did not improve
+            counter += 1
             if counter >= patience:
                 print("Early stopping triggered.")
                 break
+
         model.train() #Back to training mode after validation
 
+        if (epoch+1) % 10 == 0:
+            print(f'Epoch [{epoch+1}/{epochs}], Training Loss: {loss.item():.4f}, Macro-average F1: {macro_f1:.4f}')
 
     # Evaluation and Classification Report
     model.eval()
@@ -226,17 +209,27 @@ while len(X_train.columns) > 10:
         actual = y_test_tensor.cpu().numpy()
 
     report = classification_report(actual, predicted, output_dict=True, zero_division=0, labels=[0.0, 1.0])  # added zero_division, set labels
-    all_results.append({
+
+    current_result = {
+        'hidden_layers': hidden_layers,
         'f1-score_0.0': report['0.0']['f1-score'],
         'f1-score_1.0': report['1.0']['f1-score'],
         'accuracy': report['accuracy'],
-        'macro_f1': report['macro avg']['f1-score'],
-        'num_features': X_train.shape[1],
-        'features': X_train.columns.tolist()
-    })
+        'macro_f1': report['macro avg']['f1-score']
+    }
+
+    if current_result['macro_f1'] > best_macro_f1:
+        best_macro_f1 = current_result['macro_f1']
+        best_result = current_result
 
 
 # --- Results Table ---
-results_df = pd.DataFrame(all_results)
-print("\nPerformance Comparison:")
-print(results_df)
+print("\nBest Performance:")
+if best_result:
+    print(f"Hidden Layers: {best_result['hidden_layers']}")
+    print(f"Macro F1: {best_result['macro_f1']:.4f}")
+    print(f"F1-score (0.0): {best_result['f1-score_0.0']:.4f}")
+    print(f"F1-score (1.0): {best_result['f1-score_1.0']:.4f}")
+    print(f"Accuracy: {best_result['accuracy']:.4f}")
+else:
+    print("No results to display.")
