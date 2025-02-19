@@ -8,7 +8,10 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import classification_report
-from imblearn.over_sampling import SMOTE  # Import SMOTE
+from imblearn.under_sampling import RandomUnderSampler
+from imblearn.over_sampling import RandomOverSampler
+from sklearn.metrics import f1_score  # Import f1_score for calculating F1 outside of classification report
+from collections import Counter
 
 # --- Data Loading and Preprocessing (same as your previous code) ---
 print("Current working directory:", os.getcwd())
@@ -72,9 +75,47 @@ y = combined_df['SepsisLabel']
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=66)
 
 
-# --- Oversampling with SMOTE (ONLY on the training set) ---
-smote = SMOTE(random_state=42)  # Instantiate SMOTE
-X_train, y_train = smote.fit_resample(X_train, y_train)
+# --- Oversampling/Undersampling to Geometric Mean ---
+
+# Calculate the number of samples for each class
+positive_count = y_train[y_train == 1].shape[0]
+negative_count = y_train[y_train == 0].shape[0]
+
+print(f"Original class distribution: {Counter(y_train)}")
+
+# Calculate the geometric mean of the class sizes
+geometric_mean = int(np.sqrt(positive_count * negative_count))
+
+print(f"Geometric mean: {geometric_mean}")
+
+# Determine which class is smaller and which is larger
+if positive_count < negative_count:
+    minority_class_count = positive_count
+    majority_class_count = negative_count
+    minority_class_label = 1
+    majority_class_label = 0
+else:
+    minority_class_count = negative_count
+    majority_class_count = positive_count
+    minority_class_label = 0
+    majority_class_label = 1
+
+# Define resampling strategy
+resample_strategy = {
+    minority_class_label: geometric_mean,
+    majority_class_label: geometric_mean
+}
+
+print(f"Resample strategy: {resample_strategy}")
+
+# Apply oversampling to the minority class and undersampling to the majority class
+over = RandomOverSampler(sampling_strategy={minority_class_label: geometric_mean}, random_state=42)
+under = RandomUnderSampler(sampling_strategy={majority_class_label: geometric_mean}, random_state=42)
+
+X_over, y_over = over.fit_resample(X_train, y_train)
+X_train, y_train = under.fit_resample(X_over, y_over)
+
+print(f"Resampled class distribution: {Counter(y_train)}")
 
 
 # --- Feature Selection ---
@@ -123,31 +164,37 @@ class PytorchModelBinary(nn.Module):  # Renamed to indicate binary classificatio
 
 # --- Model Configuration ---
 hidden_layers = [256, 128, 64]
-print(f"Training with neurons: {hidden_layers}")
+learning_rate = 0.000001  # You can tune this!
+print(f"Training with neurons: {hidden_layers}, learning rate: {learning_rate}")
 
 # Model Instantiation
 input_dim = X_train.shape[1]
 model = PytorchModelBinary(input_dim, hidden_layers)
 
 # Optimizer
-optimizer = optim.Adam(model.parameters())
+optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-# Loss function
+# Define Device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+model.to(device)
+
+# Loss function  (Cross-Entropy is still needed for training)
 criterion = nn.BCELoss()
 
-# Data to tensors
-X_train_tensor = torch.tensor(X_train)
-y_train_tensor = torch.tensor(y_train).unsqueeze(1)
-X_test_tensor = torch.tensor(X_test)
-y_test_tensor = torch.tensor(y_test).unsqueeze(1)
+# Data to tensors and move to device
+X_train_tensor = torch.tensor(X_train).to(device)
+y_train_tensor = torch.tensor(y_train).unsqueeze(1).to(device)
+X_test_tensor = torch.tensor(X_test).to(device)
+y_test_tensor = torch.tensor(y_test).unsqueeze(1).to(device)
 
 
-# --- Training loop ---
-epochs = 500
+# --- Training loop with Early Stopping ---
+epochs = 300  # Set maximum number of epochs
 batch_size = 32
-patience = 20
-best_f1s = [0.0, 0.0]  # Initialize best F1 scores for each class (0 and 1)
-counter = 0
+patience = 50  # Number of epochs to wait for improvement
+best_macro_f1 = 0.0
+epochs_no_improve = 0
 
 for epoch in range(epochs):
     model.train()
@@ -162,34 +209,34 @@ for epoch in range(epochs):
         loss.backward()
         optimizer.step()
 
-    # Validation and F1-score calculation
-    model.eval()
-    with torch.no_grad():
+    # Validation and Early Stopping
+    model.eval()  # Set model to evaluation mode
+    with torch.no_grad():  # Disable gradient calculation during evaluation
         test_outputs = model(X_test_tensor)
-        predicted = (test_outputs > 0.5).float().cpu().numpy()
-        actual = y_test_tensor.cpu().numpy()
+        predicted_probs = test_outputs.cpu().numpy() #Move to CPU for calculating F1
+        predicted = (predicted_probs > 0.5).astype(int) #Convert probs to binary predictions
+        actual = y_test_tensor.cpu().numpy().astype(int)
 
-    report = classification_report(actual, predicted, output_dict=True, zero_division=0, labels=[0.0, 1.0])  # Get macro-average F1 score, set labels
-    f1_0 = report['0.0']['f1-score']  # F1-score for class 0
-    f1_1 = report['1.0']['f1-score']  # F1-score for class 1
-    macro_f1 = report['macro avg']['f1-score']
+    # Calculate Macro F1 Score
+    macro_f1 = f1_score(actual, predicted, average='macro') #Use the actual binary values for F1 score
+    if epoch%10 == 0:
+        print(f'Epoch [{epoch+1}/{epochs}], Training Loss: {loss.item():.4f}, Macro-average F1: {macro_f1:.4f}')
+    model.train()  # Set model back to training mode
 
-    # Check if *both* F1-scores improved
-    if f1_0 > best_f1s[0] and f1_1 > best_f1s[1]:
-        best_f1s = [f1_0, f1_1]
-        counter = 0
+    # Early stopping check
+    if macro_f1 > best_macro_f1:
+        best_macro_f1 = macro_f1
+        epochs_no_improve = 0
+        torch.save(model.state_dict(), 'best_model.pth') # Save the best model
     else:
-        counter += 1
-        if counter >= patience:
-            print("Early stopping triggered.")
+        epochs_no_improve += 1
+        if epochs_no_improve == patience:
+            print(f"Early stopping triggered after {epoch+1} epochs!")
+            print(f"Best Macro-average F1 score: {best_macro_f1:.4f}")
             break
 
-    model.train() #Back to training mode after validation
-
-    if (epoch+1) % 10 == 0:
-        print(f'Epoch [{epoch+1}/{epochs}], Training Loss: {loss.item():.4f}, Macro-average F1: {macro_f1:.4f}')
-
-# --- Evaluation and Classification Report ---
+# --- Load Best Model and Evaluate ---
+model.load_state_dict(torch.load('best_model.pth'))
 model.eval()
 with torch.no_grad():
     outputs = model(X_test_tensor)
@@ -199,7 +246,8 @@ with torch.no_grad():
 report = classification_report(actual, predicted, output_dict=True, zero_division=0, labels=[0.0, 1.0])  # added zero_division, set labels
 
 print("\nPerformance with 256, 128, 64 Hidden Layers:")
-print(f"Macro F1: {report['macro avg']['f1-score']:.4f}")
+print(f"Learning Rate: {learning_rate}") #Added to report
+print(f"Best Macro F1: {report['macro avg']['f1-score']:.4f}")
 print(f"F1-score (0.0): {report['0.0']['f1-score']:.4f}")
 print(f"F1-score (1.0): {report['1.0']['f1-score']:.4f}")
 print(f"Accuracy: {report['accuracy']:.4f}")
