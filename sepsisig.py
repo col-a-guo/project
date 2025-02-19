@@ -158,7 +158,7 @@ class PytorchModelBinary(nn.Module):  # Renamed to indicate binary classificatio
 
 # --- Model Configuration ---
 hidden_layers = [256, 128, 64]
-learning_rate = 0.000005  #Fixed learning rate
+learning_rate = 0.00003  #Fixed learning rate
 print(f"Training with neurons: {hidden_layers}, learning rate: {learning_rate}")
 
 # Model Instantiation
