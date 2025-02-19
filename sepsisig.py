@@ -13,11 +13,11 @@ from imblearn.over_sampling import SMOTE  # Import SMOTE
 # --- Data Loading and Preprocessing (same as your previous code) ---
 print("Current working directory:", os.getcwd())
 # Define the path pattern to locate .psv files in the folder
-file_pattern = "CC_2019_Sepsis/training_setC/*.psv"
+file_pattern = "CC_2019_Sepsis/training_setA/*.psv"
 files = glob.glob(file_pattern)
 print("Files found:", files)
 if not files:
-    absolute_file_pattern = "C:/Users/r2d2go/Desktop/project/CC-2019-Sepsis/training_setC/*.psv"
+    absolute_file_pattern = "C:/Users/r2d2go/Desktop/project/CC-2019-Sepsis/training_setA/*.psv"
     files = glob.glob(absolute_file_pattern)
     print("Files found (absolute path):", files)
 # Option 1: Read all files into a list of DataFrames
@@ -121,115 +121,85 @@ class PytorchModelBinary(nn.Module):  # Renamed to indicate binary classificatio
         return x
 
 
-# --- Hyperparameter Search ---
-neuron_configs = [
-    [256, 128, 64],
-    [64, 256, 64, 16],
-    [100, 50, 25],
-    [128, 64, 32],
-    [256, 64, 16]
-    
-]
+# --- Model Configuration ---
+hidden_layers = [256, 128, 64]
+print(f"Training with neurons: {hidden_layers}")
 
-best_result = None
-best_macro_f1 = 0.0
+# Model Instantiation
+input_dim = X_train.shape[1]
+model = PytorchModelBinary(input_dim, hidden_layers)
 
-for hidden_layers in neuron_configs:
-    print(f"\n--- Training with neurons: {hidden_layers} ---")
+# Optimizer
+optimizer = optim.Adam(model.parameters())
 
-    # Model Instantiation
-    input_dim = X_train.shape[1]
-    model = PytorchModelBinary(input_dim, hidden_layers)
+# Loss function
+criterion = nn.BCELoss()
 
-    # Optimizer
-    optimizer = optim.Adam(model.parameters())
-
-    # Loss function
-    criterion = nn.BCELoss()
-
-    # Data to tensors
-    X_train_tensor = torch.tensor(X_train)
-    y_train_tensor = torch.tensor(y_train).unsqueeze(1)
-    X_test_tensor = torch.tensor(X_test)
-    y_test_tensor = torch.tensor(y_test).unsqueeze(1)
+# Data to tensors
+X_train_tensor = torch.tensor(X_train)
+y_train_tensor = torch.tensor(y_train).unsqueeze(1)
+X_test_tensor = torch.tensor(X_test)
+y_test_tensor = torch.tensor(y_test).unsqueeze(1)
 
 
-    # Training loop
-    epochs = 500  # Reduced epochs for faster testing
-    batch_size = 32
-    patience = 20
-    best_f1s = [0.0, 0.0]  # Initialize best F1 scores for each class (0 and 1)
-    counter = 0
+# --- Training loop ---
+epochs = 500
+batch_size = 32
+patience = 20
+best_f1s = [0.0, 0.0]  # Initialize best F1 scores for each class (0 and 1)
+counter = 0
 
-    for epoch in range(epochs):
-        model.train()
-        for i in range(0, len(X_train), batch_size):
-            X_batch = X_train_tensor[i:i+batch_size]
-            y_batch = y_train_tensor[i:i+batch_size]
+for epoch in range(epochs):
+    model.train()
+    for i in range(0, len(X_train), batch_size):
+        X_batch = X_train_tensor[i:i+batch_size]
+        y_batch = y_train_tensor[i:i+batch_size]
 
-            outputs = model(X_batch)
-            loss = criterion(outputs, y_batch)
+        outputs = model(X_batch)
+        loss = criterion(outputs, y_batch)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-        # Validation and F1-score calculation
-        model.eval()
-        with torch.no_grad():
-            test_outputs = model(X_test_tensor)
-            predicted = (test_outputs > 0.5).float().cpu().numpy()
-            actual = y_test_tensor.cpu().numpy()
-
-        report = classification_report(actual, predicted, output_dict=True, zero_division=0, labels=[0.0, 1.0])  # Get macro-average F1 score, set labels
-        f1_0 = report['0.0']['f1-score']  # F1-score for class 0
-        f1_1 = report['1.0']['f1-score']  # F1-score for class 1
-        macro_f1 = report['macro avg']['f1-score']
-
-        # Check if *both* F1-scores improved
-        if f1_0 > best_f1s[0] and f1_1 > best_f1s[1]:
-            best_f1s = [f1_0, f1_1]
-            counter = 0
-        else:
-            counter += 1
-            if counter >= patience:
-                print("Early stopping triggered.")
-                break
-
-        model.train() #Back to training mode after validation
-
-        if (epoch+1) % 10 == 0:
-            print(f'Epoch [{epoch+1}/{epochs}], Training Loss: {loss.item():.4f}, Macro-average F1: {macro_f1:.4f}')
-
-    # Evaluation and Classification Report
+    # Validation and F1-score calculation
     model.eval()
     with torch.no_grad():
-        outputs = model(X_test_tensor)
-        predicted = (outputs > 0.5).float().cpu().numpy()  # Move to CPU if using GPU
+        test_outputs = model(X_test_tensor)
+        predicted = (test_outputs > 0.5).float().cpu().numpy()
         actual = y_test_tensor.cpu().numpy()
 
-    report = classification_report(actual, predicted, output_dict=True, zero_division=0, labels=[0.0, 1.0])  # added zero_division, set labels
+    report = classification_report(actual, predicted, output_dict=True, zero_division=0, labels=[0.0, 1.0])  # Get macro-average F1 score, set labels
+    f1_0 = report['0.0']['f1-score']  # F1-score for class 0
+    f1_1 = report['1.0']['f1-score']  # F1-score for class 1
+    macro_f1 = report['macro avg']['f1-score']
 
-    current_result = {
-        'hidden_layers': hidden_layers,
-        'f1-score_0.0': report['0.0']['f1-score'],
-        'f1-score_1.0': report['1.0']['f1-score'],
-        'accuracy': report['accuracy'],
-        'macro_f1': report['macro avg']['f1-score']
-    }
+    # Check if *both* F1-scores improved
+    if f1_0 > best_f1s[0] and f1_1 > best_f1s[1]:
+        best_f1s = [f1_0, f1_1]
+        counter = 0
+    else:
+        counter += 1
+        if counter >= patience:
+            print("Early stopping triggered.")
+            break
 
-    if current_result['macro_f1'] > best_macro_f1:
-        best_macro_f1 = current_result['macro_f1']
-        best_result = current_result
+    model.train() #Back to training mode after validation
 
+    if (epoch+1) % 10 == 0:
+        print(f'Epoch [{epoch+1}/{epochs}], Training Loss: {loss.item():.4f}, Macro-average F1: {macro_f1:.4f}')
 
-# --- Results Table ---
-print("\nBest Performance:")
-if best_result:
-    print(f"Hidden Layers: {best_result['hidden_layers']}")
-    print(f"Macro F1: {best_result['macro_f1']:.4f}")
-    print(f"F1-score (0.0): {best_result['f1-score_0.0']:.4f}")
-    print(f"F1-score (1.0): {best_result['f1-score_1.0']:.4f}")
-    print(f"Accuracy: {best_result['accuracy']:.4f}")
-else:
-    print("No results to display.")
+# --- Evaluation and Classification Report ---
+model.eval()
+with torch.no_grad():
+    outputs = model(X_test_tensor)
+    predicted = (outputs > 0.5).float().cpu().numpy()  # Move to CPU if using GPU
+    actual = y_test_tensor.cpu().numpy()
+
+report = classification_report(actual, predicted, output_dict=True, zero_division=0, labels=[0.0, 1.0])  # added zero_division, set labels
+
+print("\nPerformance with 256, 128, 64 Hidden Layers:")
+print(f"Macro F1: {report['macro avg']['f1-score']:.4f}")
+print(f"F1-score (0.0): {report['0.0']['f1-score']:.4f}")
+print(f"F1-score (1.0): {report['1.0']['f1-score']:.4f}")
+print(f"Accuracy: {report['accuracy']:.4f}")
